@@ -17,9 +17,13 @@ import threading
 from threading import Lock
 from logging.handlers import RotatingFileHandler
 import redis
+from pillow_heif import register_heif_opener
 
 # Connect to Redis
 redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+
+# Register HEIF opener
+register_heif_opener()
 
 # Flask app setup
 app = Flask(__name__)
@@ -84,6 +88,12 @@ def upload_files():
     job_id = str(uuid.uuid4())
     app.logger.info(f"Generated job_id: {job_id}")
 
+    # Retrieve the number of variations from the request
+    try:
+        variations = int(request.form.get('variations', 1))
+    except ValueError:
+        return jsonify({"error": "Invalid variations value"}), 400
+
     # Create session-specific temporary directories
     session_upload_folder = tempfile.mkdtemp(dir=UPLOAD_FOLDER)
     session_output_folder = tempfile.mkdtemp(dir=OUTPUT_FOLDER)
@@ -105,7 +115,8 @@ def upload_files():
 
     try:
         # Store job data in Redis
-        redis_client.hset(f"job:{job_id}", "total_files", len(files))
+        total_files = len(files) * variations
+        redis_client.hset(f"job:{job_id}", "total_files", total_files)
         redis_client.hset(f"job:{job_id}", "completed_files", 0)
         redis_client.hset(f"job:{job_id}", "status", "pending")
         redis_client.hset(f"job:{job_id}", "progress", 0)
@@ -118,18 +129,25 @@ def upload_files():
             file_path = os.path.join(session_upload_folder, filename)
             file.save(file_path)  # Save the file to session_upload_folder
 
-            output_path = os.path.join(session_output_folder, f"processed_{filename}")
+            for i in range(variations):
+                variation_output_path = os.path.join(
+                    session_output_folder, f"processed_{i+1}_{filename}"
+                )
 
-            # Determine file type and process accordingly
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                app.logger.info(f"[UPLOAD] Queued image file: {filename}")
-                threading.Thread(target=modify_image, args=(file_path, output_path, job_id), daemon=True).start()
-            elif filename.lower().endswith(('.mp4', '.avi')):
-                app.logger.info(f"[UPLOAD] Queued video file: {filename}")
-                threading.Thread(target=modify_video, args=(file_path, output_path, job_id), daemon=True).start()
-            else:
-                app.logger.warning(f"Unsupported file type skipped: {filename}")
-                continue  # Skip unsupported files
+                # Determine file type and process accordingly
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.heic', '.webp')):
+                    app.logger.info(f"[UPLOAD] Queued image file: {filename}")
+                    threading.Thread(
+                        target=modify_image, args=(file_path, variation_output_path, job_id, i), daemon=True
+                    ).start()
+                elif filename.lower().endswith(('.mp4', '.avi', '.mov')):
+                    app.logger.info(f"[UPLOAD] Queued video file: {filename}")
+                    threading.Thread(
+                        target=modify_video, args=(file_path, variation_output_path, job_id, i), daemon=True
+                    ).start()
+                else:
+                    app.logger.warning(f"Unsupported file type skipped: {filename}")
+                    continue  # Skip unsupported files
 
         app.logger.info(f"All files queued for processing under Job ID {job_id}")
         return jsonify({"job_id": job_id})
@@ -248,37 +266,50 @@ def update_job_progress(job_id):
 
 
 # Function to modify images
-def modify_image(input_path, output_path, job_id):
+def modify_image(input_path, output_path, job_id, variation):
     try:
         redis_client.hset(f"job:{job_id}", "status", "processing")
-        image = Image.open(input_path).convert("RGB")
+        image = Image.open(input_path)
 
-        # Modify image color slightly (randomized change)
+        if image.mode not in ["RGB", "RGBA"]:
+            image = image.convert("RGB")
+
+        if image.mode != "RGBA":
+            image = image.convert("RGB")
+
+        # Apply a unique adjustment for each variation
+        random.seed(variation)  # Ensure consistent randomness per variation
+        adjustment = random.uniform(-0.1, 0.1)
+
         image_array = np.array(image, dtype=np.float32)
-        adjustment = random.uniform(-0.05, 0.05)  # Randomized between -5% and +5%
         image_array = np.clip(image_array * (1 + adjustment), 0, 255).astype(np.uint8)
         modified_image = Image.fromarray(image_array)
 
         # Add invisible mesh overlay
         modified_image = add_invisible_mesh(modified_image)
 
-        # Save image
-        modified_image.save(output_path)
+        # Save the modified image
+        # Ensure PNG format is used for HEIC or unsupported formats
+        if input_path.lower().endswith(".heic", ".webp"):
+            output_path = os.path.splitext(output_path)[0] + ".png"
 
-        # Update progress to complete
+        # Save the modified image
+        modified_image.save(output_path, format="PNG")
+
         redis_client.hincrby(f"job:{job_id}", "completed_files", 1)
         update_job_progress(job_id)
 
     except Exception as e:
         redis_client.hset(f"job:{job_id}", "status", f"error: {e}")
 
+
 # Function to modify videos
-def modify_video(input_path, output_path, job_id):
+def modify_video(input_path, output_path, job_id, variation):
     try:
         # Unique temporary paths for audio and video processing
-        temp_audio_path = os.path.join(OUTPUT_FOLDER, f"{job_id}_{os.path.basename(input_path)}_temp_audio.mp3")
-        temp_video_path = os.path.join(OUTPUT_FOLDER, f"{job_id}_{os.path.basename(input_path)}_temp_video.mp4")
-        
+        temp_audio_path = os.path.join(OUTPUT_FOLDER, f"{job_id}_{variation}_{os.path.basename(input_path)}_temp_audio.mp3")
+        temp_video_path = os.path.join(OUTPUT_FOLDER, f"{job_id}_{variation}_{os.path.basename(input_path)}_temp_video.mp4")
+
         redis_client.hset(f"job:{job_id}", "status", "processing")
 
         # Extract audio
@@ -294,9 +325,10 @@ def modify_video(input_path, output_path, job_id):
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Adjust FPS randomly by ±5%
+
+        # Adjust FPS randomly by ±5% for each variation
         original_fps = cap.get(cv2.CAP_PROP_FPS)
+        random.seed(variation)  # Ensure consistent randomness per variation
         adjusted_fps = original_fps * random.uniform(0.95, 1.05)
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -346,13 +378,10 @@ def modify_video(input_path, output_path, job_id):
         subprocess.run(combine_command, check=True, capture_output=True, text=True, timeout=3000)
 
     except Exception as e:
-        app.logger.error(f"Error in video processing for job {job_id}: {e}")
+        app.logger.error(f"Error in video processing for job {job_id}, variation {variation}: {e}")
     finally:
         # Cleanup and progress update
         safe_remove(temp_audio_path)
         safe_remove(temp_video_path)
         redis_client.hincrby(f"job:{job_id}", "completed_files", 1)
         update_job_progress(job_id)
-
-
-
