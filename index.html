@@ -192,6 +192,11 @@ button:disabled {
         #lottie-container, .progress-bar-container {
     transition: opacity 1s ease-out;
 }
+#variations-div {margin:10px 0;}
+
+#variations {    padding: 10px;
+    border-radius: 10px;
+    border: 2px solid #9dceff;}
 
 
     </style>
@@ -214,9 +219,20 @@ button:disabled {
                     <div id="progress-bar-container" class="progress-bar-container" style="display: none;">
                         <div id="progress-bar" class="progress-bar"></div>
                     </div>
+                    <div id="variations-div">
+                        <label for="variations">Number of Variations:</label>
+                        <select id="variations" name="variations">
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                        </select>
+                    </div>
                     <div style="display: flex; justify-content: center; gap: 10px;">
                         <button id="clear-button" type="button" disabled>Clear</button>
                         <button id="upload-button" type="submit" disabled>Upload</button>
+                        <button id="upload-more-button" type="button" style="display: none;">Upload More Creatives</button>
                     </div>
                     
                 </div>
@@ -242,15 +258,6 @@ const lottieContainer = document.getElementById('lottie-container');
 const cardTitle = document.getElementById('card-title');
 const cardSubtitle = document.getElementById('card-subtitle');
 
-        // Initialize Lottie Animation
-        const lottieData = document.getElementById('lottie-json').textContent;
-        const animation = lottie.loadAnimation({
-            container: document.getElementById('lottie-animation'),
-            renderer: 'svg',
-            loop: true,
-            autoplay: true,
-            animationData: JSON.parse(lottieData)
-        });
 
 function updateButtonStates() {
     // Enable buttons if there are files on the canvas
@@ -258,6 +265,50 @@ function updateButtonStates() {
     clearButton.disabled = !hasFiles;
     uploadButton.disabled = !hasFiles;
 }
+
+// Get references to the new button
+const uploadMoreButton = document.getElementById('upload-more-button');
+
+function resetPage() {
+    // Reset file input and thumbnails
+    fileInput.value = '';
+    thumbnailsContainer.innerHTML = '';
+
+    lottie.destroy(); // Destroy the current animation
+
+    // Hide progress bar and animation
+    progressBarContainer.style.display = 'none';
+    progressBarContainer.style.opacity = '1';
+    lottieContainer.style.display = 'none';
+
+    // Reset titles
+    cardTitle.textContent = 'Upload Your Files';
+    cardSubtitle.textContent = 'Drag and drop files here or click to select';
+
+    // Hide "Upload More Creatives" button and show original buttons
+    uploadMoreButton.style.display = 'none';
+    clearButton.style.display = '';
+    uploadButton.style.display = '';
+
+    // Disable buttons
+    clearButton.disabled = true;
+    uploadButton.disabled = true;
+
+    // Show drop zone
+    dropZone.classList.remove('hidden');
+}
+
+// Replace "Clear" and "Upload" buttons with "Upload More Creatives" button
+function showUploadMoreButton() {
+    clearButton.style.display = 'none';
+    uploadButton.style.display = 'none';
+    uploadMoreButton.style.display = 'inline-block';
+}
+
+// Add event listener for the "Upload More Creatives" button
+uploadMoreButton.addEventListener('click', () => {
+    resetPage();
+});
 
 // Function to track progress and update the progress bar
 function trackProgress(jobId) {
@@ -293,9 +344,13 @@ function trackProgress(jobId) {
                             autoplay: true,
                             animationData: JSON.parse(lottieDataComplete)
                         });
+                        setTimeout(() => {
+                            window.location.href = `/download/${jobId}`;
+                        },1000);
+                        
 
-                        window.location.href = `/download/${jobId}`;
-                        // Hide the progress bar container
+                        // Show the "Upload More Creatives" button
+                        showUploadMoreButton();
                         
                     }, 1000); // Wait for the fade-out to complete
 
@@ -319,6 +374,16 @@ function trackProgress(jobId) {
 uploadButton.addEventListener('click', (event) => {
     event.preventDefault();
 
+    // Initialize Lottie Animation
+    const lottieData = document.getElementById('lottie-json').textContent;
+        const animation = lottie.loadAnimation({
+            container: document.getElementById('lottie-animation'),
+            renderer: 'svg',
+            loop: true,
+            autoplay: true,
+            animationData: JSON.parse(lottieData)
+        });
+
     // Hide drag-and-drop canvas and show progress bar
     dropZone.classList.add('hidden');
     lottieContainer.style.display = 'block';
@@ -332,6 +397,10 @@ uploadButton.addEventListener('click', (event) => {
 
     const formData = new FormData(document.getElementById('upload-form'));
     //progressBarContainer.style.display = 'block';
+    // Add the selected number of variations to the form data
+    const variations = document.getElementById('variations').value;
+    formData.append('variations', variations)
+
     progressBar.style.width = '0%';
 
     fetch('/upload', {
